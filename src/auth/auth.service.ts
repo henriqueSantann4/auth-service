@@ -4,15 +4,22 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from '../users/users.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { User } from '../users/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
+
+interface JwtPayload {
+  sub: string;
+  email: string;
+  jti: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -64,8 +71,51 @@ export class AuthService {
     return this.generateTokens(user);
   }
 
+  async refreshTokens(refreshToken: string) {
+    let payload: JwtPayload;
+
+    try {
+      payload = await this.jwtService.verifyAsync(refreshToken, {
+        secret: this.configService.get('JWT_REFRESH_SECRET'),
+      });
+    } catch {
+      throw new UnauthorizedException('Refresh token inválido ou expirado');
+    }
+
+    const storedToken = await this.refreshTokenRepository.findOne({
+      where: {
+        jti: payload.jti,
+        userId: payload.sub,
+        revoked: false,
+        expiresAt: MoreThan(new Date()),
+      },
+    });
+
+    if (!storedToken) {
+      throw new UnauthorizedException('Refresh token inválido ou expirado');
+    }
+
+    const isValid = await bcrypt.compare(refreshToken, storedToken.tokenHash);
+
+    if (!isValid) {
+      throw new UnauthorizedException('Refresh token inválido ou expirado');
+    }
+
+    storedToken.revoked = true;
+    await this.refreshTokenRepository.save(storedToken);
+
+    const user = await this.usersService.findById(payload.sub);
+
+    if (!user) {
+      throw new UnauthorizedException('Usuário não encontrado');
+    }
+
+    return this.generateTokens(user);
+  }
+
   private async generateTokens(user: User) {
-    const payload = { sub: user.id, email: user.email };
+    const jti = randomUUID();
+    const payload = { sub: user.id, email: user.email, jti };
 
     const accessToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get('JWT_ACCESS_SECRET'),
@@ -77,12 +127,16 @@ export class AuthService {
       expiresIn: this.configService.get('JWT_REFRESH_EXPIRATION'),
     });
 
-    await this.storeRefreshToken(user.id, refreshToken);
+    await this.storeRefreshToken(user.id, refreshToken, jti);
 
     return { accessToken, refreshToken };
   }
 
-  private async storeRefreshToken(userId: string, refreshToken: string) {
+  private async storeRefreshToken(
+    userId: string,
+    refreshToken: string,
+    jti: string,
+  ) {
     const tokenHash = await bcrypt.hash(refreshToken, 10);
 
     const expiresAt = new Date();
@@ -91,6 +145,7 @@ export class AuthService {
     const tokenEntity = this.refreshTokenRepository.create({
       userId,
       tokenHash,
+      jti,
       expiresAt,
     });
 

@@ -13,6 +13,9 @@ export class RefreshToken {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  @Column({ unique: true })
+  jti: string;
+
   @Column()
   tokenHash: string;
 
