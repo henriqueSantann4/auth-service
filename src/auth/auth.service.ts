@@ -2,18 +2,21 @@ import {
   Injectable,
   ConflictException,
   UnauthorizedException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from '../users/users.service';
+import { MailService } from '../mail/mail.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { User } from '../users/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { EmailVerificationToken } from './entities/email-verification-token.entity';
 
 interface JwtPayload {
   sub: string;
@@ -27,8 +30,11 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly mailService: MailService,
     @InjectRepository(RefreshToken)
     private readonly refreshTokenRepository: Repository<RefreshToken>,
+    @InjectRepository(EmailVerificationToken)
+    private readonly emailVerificationTokenRepository: Repository<EmailVerificationToken>,
   ) {}
 
   async register(dto: RegisterDto): Promise<Omit<User, 'password'>> {
@@ -47,8 +53,47 @@ export class AuthService {
       name: dto.name,
     });
 
+    await this.createAndSendVerificationToken(user);
+
     const { password, ...result } = user;
     return result;
+  }
+
+  private async createAndSendVerificationToken(user: User): Promise<void> {
+    const token = randomBytes(32).toString('hex');
+
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24);
+
+    const verificationToken = this.emailVerificationTokenRepository.create({
+      token,
+      userId: user.id,
+      expiresAt,
+    });
+
+    await this.emailVerificationTokenRepository.save(verificationToken);
+
+    await this.mailService.sendVerificationEmail(user.email, token);
+  }
+
+  async verifyEmail(token: string): Promise<{ message: string }> {
+    const verificationToken =
+      await this.emailVerificationTokenRepository.findOne({
+        where: {
+          token,
+          expiresAt: MoreThan(new Date()),
+        },
+      });
+
+    if (!verificationToken) {
+      throw new NotFoundException('Token de verificação inválido ou expirado');
+    }
+
+    await this.usersService.markEmailAsVerified(verificationToken.userId);
+
+    await this.emailVerificationTokenRepository.delete(verificationToken.id);
+
+    return { message: 'E-mail verificado com sucesso!' };
   }
 
   async login(dto: LoginDto) {
