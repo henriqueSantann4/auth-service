@@ -34,4 +34,8 @@ export class UsersService {
   async markEmailAsVerified(userId: string): Promise<void> {
     await this.usersRepository.update(userId, { isEmailVerified: true });
   }
+
+  async updatePassword(userId: string, hashedPassword: string): Promise<void> {
+    await this.usersRepository.update(userId, { password: hashedPassword });
+  }
 }

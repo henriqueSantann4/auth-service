@@ -14,9 +14,12 @@ import { UsersService } from '../users/users.service';
 import { MailService } from '../mail/mail.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { User } from '../users/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { EmailVerificationToken } from './entities/email-verification-token.entity';
+import { PasswordResetToken } from './entities/password-reset-token.entity';
 
 interface JwtPayload {
   sub: string;
@@ -35,6 +38,8 @@ export class AuthService {
     private readonly refreshTokenRepository: Repository<RefreshToken>,
     @InjectRepository(EmailVerificationToken)
     private readonly emailVerificationTokenRepository: Repository<EmailVerificationToken>,
+    @InjectRepository(PasswordResetToken)
+    private readonly passwordResetTokenRepository: Repository<PasswordResetToken>,
   ) {}
 
   async register(dto: RegisterDto): Promise<Omit<User, 'password'>> {
@@ -94,6 +99,61 @@ export class AuthService {
     await this.emailVerificationTokenRepository.delete(verificationToken.id);
 
     return { message: 'E-mail verificado com sucesso!' };
+  }
+
+  async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
+    const genericMessage = {
+      message: 'Se este e-mail existir, você receberá um link de recuperação',
+    };
+
+    const user = await this.usersService.findByEmail(dto.email);
+
+    if (!user) {
+      return genericMessage;
+    }
+
+    const token = randomBytes(32).toString('hex');
+
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 1);
+
+    const resetToken = this.passwordResetTokenRepository.create({
+      token,
+      userId: user.id,
+      expiresAt,
+    });
+
+    await this.passwordResetTokenRepository.save(resetToken);
+
+    await this.mailService.sendPasswordResetEmail(user.email, token);
+
+    return genericMessage;
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
+    const resetToken = await this.passwordResetTokenRepository.findOne({
+      where: {
+        token: dto.token,
+        expiresAt: MoreThan(new Date()),
+      },
+    });
+
+    if (!resetToken) {
+      throw new NotFoundException('Token de recuperação inválido ou expirado');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+
+    await this.usersService.updatePassword(resetToken.userId, hashedPassword);
+
+    await this.passwordResetTokenRepository.delete(resetToken.id);
+
+    await this.refreshTokenRepository.update(
+      { userId: resetToken.userId, revoked: false },
+      { revoked: true },
+    );
+
+    return { message: 'Senha redefinida com sucesso!' };
   }
 
   async login(dto: LoginDto) {
